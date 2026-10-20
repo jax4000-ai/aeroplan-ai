@@ -1,5 +1,43 @@
 # infrastructure (Terraform)
 
+## Status: partially deployed
+
+Only the **frontend hosting** piece has been applied so far — `frontend.tf`, `providers.tf`,
+`variables.tf`, `outputs.tf`. Everything else in the P0 checklist below (networking, RDS,
+DynamoDB, SQS/SNS, Step Functions, ECS/Fargate for the 5 backend services, API Gateway) is **not
+yet written or applied**.
+
+**Live:** http://aeroplan-frontend-9a86245a.s3-website.us-east-2.amazonaws.com
+
+**Deviation from the frozen spec:** `docs/infrastructure-spec.md` calls for a private S3 bucket
+behind CloudFront with Origin Access Control. Creating a CloudFront distribution on this AWS
+account currently fails with `AccessDenied: Your account must be verified before you can add new
+CloudFront resources` — a one-time AWS Support/billing verification step that hadn't happened yet.
+Rather than block the demo on that, `frontend.tf` falls back to a plain **public S3 bucket with
+static website hosting** (HTTP only, no CDN/caching, no custom domain). Once the account is
+verified, swap the bucket back to private + add a CloudFront + OAC origin — nothing else in the
+architecture depends on this choice.
+
+**How it was deployed** (temporary credentials, since `aws login`'s browser-based session isn't
+natively understood by Terraform's AWS provider — see export step below):
+```powershell
+$creds = aws configure export-credentials --profile blue-origin-demo --format process | ConvertFrom-Json
+$env:AWS_ACCESS_KEY_ID = $creds.AccessKeyId
+$env:AWS_SECRET_ACCESS_KEY = $creds.SecretAccessKey
+$env:AWS_SESSION_TOKEN = $creds.SessionToken
+$env:AWS_REGION = "us-east-2"
+terraform init
+terraform apply
+aws s3 sync ../../frontend/dist s3://aeroplan-frontend-9a86245a --delete
+```
+Re-run the `aws s3 sync` command (no `terraform apply` needed) after any future frontend rebuild
+to push a new deploy. The export-credentials step must be repeated whenever the session token
+expires (roughly hourly) before running Terraform again.
+
+**Cost:** an S3 bucket serving a few hundred KB of static assets is effectively free at demo
+traffic levels (well under the free tier). `terraform destroy` removes it if you want to stop
+paying even that.
+
 All AWS infrastructure for AeroPlan AI as code. **This is the only workstream that runs
 `terraform apply` against the real AWS account** (`420374519668`, region `us-east-2`, profile
 `blue-origin-demo` is already authenticated via `aws login` in this environment — use

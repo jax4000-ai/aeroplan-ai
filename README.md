@@ -18,8 +18,24 @@ mandatory human approval before anything is published.
 
 ## Status
 
-See the priority tiers in `docs/architecture.md`. This README's status section is updated as
-each workstream lands.
+- ✅ **Frontend** (`frontend/`) — all 4 screens built against mock data, tested in-browser,
+  **deployed and live** (see Live demo below).
+- ✅ **work-order-service** — rockets, work orders, operations, dependencies (cycle-rejected),
+  resources, materials, audit log. 5/5 tests passing.
+- ✅ **scheduling-service** — deterministic scheduling engine, schedule proposals
+  (approve/reject with optimistic locking), launch-readiness rollup. 5/5 tests passing.
+- ⏳ **event-processing-service**, **notification-service**, **agent-service** — not yet built.
+- ⏳ **infrastructure/terraform** — only the frontend hosting piece is provisioned so far (see
+  below); ECS/RDS/DynamoDB/Step Functions/SQS/SNS/API Gateway are not yet provisioned.
+
+## Live demo
+
+**Frontend:** http://aeroplan-frontend-9a86245a.s3-website.us-east-2.amazonaws.com
+
+Deployed as a public S3 static website (not yet CloudFront — this AWS account needs AWS Support
+to verify it before CloudFront distributions can be created; see
+`infrastructure/terraform/README.md`). It's running against bundled mock data (`USING_MOCK_DATA`
+in `frontend/src/api.ts`); no backend is wired up to it yet. HTTP only, no custom domain.
 
 ## Cost warning
 
