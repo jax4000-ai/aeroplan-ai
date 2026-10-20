@@ -15,10 +15,12 @@ so Terraform/CI isn't blocked, but let the owning workstream finalize the applic
 
 `../docs/infrastructure-spec.md` is the frozen contract: exact resource names, networking
 design (reuse default VPC, no NAT Gateway, internal ALB + VPC Link, Lambda HTTP bridge for Step
-Functions), IAM scoping, and every environment variable name the other three workstreams expect
-to be injected. Re-read it before writing any `.tf` file — do not redesign the network topology;
-flag concerns instead of silently changing the approach, since the other three workstreams'
-`.env.example` files and application config already assume these exact names.
+Functions), IAM scoping, and every environment variable name the other workstreams expect to be
+injected. Re-read it before writing any `.tf` file — do not redesign the network topology; flag
+concerns instead of silently changing the approach, since the other workstreams' application
+config already assumes these exact names. Note there are now **five** backend services
+(`work-order-service`, `scheduling-service`, `event-processing-service`,
+`notification-service`, `agent-service`), not two.
 
 `../workflows/step-functions/disruption-recovery.asl.json` is the Step Functions definition to
 render via `templatefile()` with the `http_bridge_lambda_arn` variable.
@@ -29,8 +31,8 @@ render via `templatefile()` with the `http_bridge_lambda_arn` variable.
 infrastructure/terraform/
 ├── main.tf              # provider, data sources (default VPC/subnets)
 ├── networking.tf        # ALB, target groups, listener rules, security groups, VPC Link
-├── compute.tf            # ECS cluster, task definitions, services, ECR repos
-├── data.tf               # RDS, DynamoDB tables, Secrets Manager
+├── compute.tf            # ECS cluster, task definitions, services, ECR repos (5 services)
+├── data.tf               # RDS, DynamoDB tables, S3 bucket, Secrets Manager
 ├── messaging.tf          # SQS + DLQ, SNS topic
 ├── orchestration.tf      # Step Functions state machine, sfn-http-bridge Lambda + IAM
 ├── edge.tf               # API Gateway HTTP API, S3 + CloudFront for frontend
@@ -44,19 +46,19 @@ infrastructure/terraform/
 
 1. `main.tf` with the `aws` provider pinned to `us-east-2`, plus `data` lookups for the default
    VPC and its subnets (do **not** create a new VPC — see `infrastructure-spec.md`).
-2. Networking: internal ALB, 3 target groups (one per ECS service), path-based listener rules
-   (`/api/*` + `/internal/*` → scheduling-service, `/events/*` → manufacturing-event-service,
-   `/agents/*` → agent-service), security groups exactly as scoped in `infrastructure-spec.md`.
+2. Networking: internal ALB, 5 target groups (one per ECS service), path-based listener rules
+   exactly as mapped in `infrastructure-spec.md`'s compute table, security groups as scoped
+   there.
 3. Data: RDS `aeroplan-db` (`db.t4g.micro`, single-AZ, `publicly_accessible=false`, credentials
    in Secrets Manager), DynamoDB `aeroplan-idempotency-records` + `aeroplan-workflow-state`
-   (on-demand billing, TTL where specified).
-4. Messaging: SQS `aeroplan-downtime-events` + DLQ with `maxReceiveCount=5` redrive, SNS
+   (on-demand billing, TTL where specified), S3 bucket `aeroplan-documents-<suffix>` (private).
+4. Messaging: SQS `aeroplan-manufacturing-events` + DLQ with `maxReceiveCount=5` redrive, SNS
    `aeroplan-schedule-notifications` (optional email subscription via `notification_email`
    variable).
 5. Orchestration: the `aeroplan-sfn-http-bridge` Lambda (VPC-attached, minimal IAM), the
    `aeroplan-disruption-recovery` Standard Step Functions state machine rendered from the ASL
    template file.
-6. Compute: ECR repos for all 3 services, ECS cluster + Fargate task definitions/services sized
+6. Compute: ECR repos for all 5 services, ECS cluster + Fargate task definitions/services sized
    per `infrastructure-spec.md`, reading config from Secrets Manager/env vars exactly as named
    in that doc's environment-variable tables. (If a service's Dockerfile isn't ready yet, use a
    placeholder `nginx:alpine` or similar so the ECS service/task-definition resources can still

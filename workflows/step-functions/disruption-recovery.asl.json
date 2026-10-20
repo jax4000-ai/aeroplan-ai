@@ -87,6 +87,7 @@
             "downtimeEvent.$": "$.downtimeEvent",
             "candidateSchedules.$": "$.impactChecks.candidateSchedules",
             "materialShortages.$": "$.impactChecks.materialShortages",
+            "affectedRocketIds.$": "$.affectedRocketIds",
             "currentScheduleVersionId.$": "$.currentScheduleVersionId"
           }
         }

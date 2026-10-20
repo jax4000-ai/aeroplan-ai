@@ -37,10 +37,11 @@ to hours, this is irrelevant.
 
 ## ADR-003: LangGraph + Amazon Bedrock for the agent graph; deterministic engine stays authoritative
 
-**Decision:** Five agents (1 supervisor + 4 specialists) implemented as a LangGraph graph in
-Python, calling Amazon Bedrock (Claude/Nova models — already available in this account in
-`us-east-2`, confirmed before building) for reasoning and explanation. The agents call back into
-`scheduling-service`'s read-only endpoints as tools for ground truth; they do not compute
+**Decision:** Six agents (1 supervisor + 5 specialists: Scheduling Optimization, Materials
+Readiness, Bottleneck & Risk, Launch Readiness, Schedule Recovery) implemented as a LangGraph
+graph in Python, calling Amazon Bedrock (Claude/Nova models — already available in this account
+in `us-east-2`, confirmed before building) for reasoning and explanation. The agents call back
+into `work-order-service`'s read-only endpoints as tools for ground truth; they do not compute
 schedules themselves.
 
 **Why:** Amazon Bedrock Agents "Classic" is closed to new customers as of July 30, 2026.
@@ -48,7 +49,10 @@ LangGraph gives full control over the multi-agent graph (supervisor routing, spe
 structured output validation) without depending on a managed agent product that's being
 deprecated for new usage. Using Bedrock (vs. a third-party LLM API) keeps the AI workload inside
 the same AWS account/network boundary as everything else, which matters for the "AWS-native"
-story of this project.
+story of this project. The **Launch Readiness Agent** specifically exists because a disruption's
+severity depends on proximity to a launch window — the same 3-hour station outage is a shrug six
+months out and a crisis two days before launch; this agent is what makes that distinction instead
+of treating every disruption identically.
 
 **Hard safety rule, enforced in code, not just prompted:** the deterministic scheduling engine
 computes feasible candidate schedules first; the agent service's output is schema-validated, and
@@ -73,18 +77,30 @@ private subnets behind a NAT Gateway or VPC endpoints, RDS Multi-AZ with a read 
 Cognito-authenticated API Gateway, WAF, per-environment Terraform workspaces, and a
 staging/production promotion pipeline.
 
-## ADR-005: Java modular-monolith-first for the two Java services
+## ADR-005: Four bounded-context Java services sharing one database, not microservices-with-independent-data
 
-**Decision:** `scheduling-service` and `manufacturing-event-service` are separate Spring Boot
-applications (separate deployables, separate ECR images, separate ECS services) sharing one
-RDS instance, rather than one monolith or many fine-grained microservices.
+**Decision:** `work-order-service`, `scheduling-service`, `event-processing-service`, and
+`notification-service` are four separate Spring Boot applications (separate deployables,
+separate ECR images, separate ECS services), each owning a distinct write responsibility, but
+**sharing one RDS instance and schema** rather than each having its own database.
 
-**Why:** The source planning document for this project explicitly recommends starting modular
-and splitting only once there's a real reason — SQS consumption and HTTP API serving have
-different scaling/failure characteristics (a slow downstream call blocking the event consumer
-shouldn't affect `GET /api/work-orders` latency), which is reason enough to split exactly these
-two, while keeping everything else (work order logic, scheduling engine, proposal handling) in
-one service rather than over-fragmenting.
+**Why:** Each service has a genuinely different scaling/failure profile worth demonstrating
+separately: `event-processing-service` absorbs bursts of SQS traffic and must never let a slow
+downstream call block `work-order-service`'s read latency; `notification-service` talks to
+external channels (SNS/Slack/email) whose latency/availability shouldn't affect scheduling;
+`scheduling-service` runs CPU-bound optimization that shouldn't compete with simple CRUD reads
+for the same thread pool. Splitting compute along these lines is a defensible, explainable
+decision. Splitting the **database** as well (one schema per service) would additionally require
+distributed transactions or eventual-consistency reconciliation between, say, `work_order` and
+`schedule_assignment` — real complexity this demo doesn't need and that would distract from the
+actual scheduling/agentic-AI story. "Modular monolith at the data layer, service-oriented at the
+compute/deploy layer" is the deliberate middle ground, and itself a position worth defending in
+an interview (most real systems land somewhere on this spectrum, not at either extreme).
+
+**Tradeoff accepted:** schema changes require coordinating across workstreams (see
+`data-model.md`'s ownership-by-table convention); a production system at larger scale would
+likely split the database per service once team size and data volume justified the added
+complexity.
 
 ## ADR-006 (frontend): No charting library for the Gantt view
 
@@ -96,3 +112,20 @@ heavy dependency, licensing questions, and keeps full control over showing propo
 overlays (current vs. candidate) which most off-the-shelf Gantt libraries don't support without
 fighting their API. Mirrors the "no new chart dependency" precedent from the companion Mission
 Notes project's operations dashboard.
+
+## ADR-007: Rocket as a first-class entity; S3 for unstructured artifacts
+
+**Decision:** `work_order` belongs to a `rocket` (not a generic free-text "project" field), and
+an S3 bucket (`aeroplan-documents`) stores unstructured artifacts (test reports, simulated
+CAD/document references) with Postgres holding only metadata/keys referencing them.
+
+**Why:** Modeling the rocket/mission explicitly is what makes "launch readiness" a meaningful,
+queryable concept (roll up every work order, test result, and open disruption for a specific
+vehicle) rather than a vague dashboard label. Keeping large/unstructured content in S3 instead of
+Postgres `bytea` columns or DynamoDB items is a standard, defensible pattern — it keeps the
+relational database focused on structured, query-heavy data and avoids bloating backups/
+replication with large blobs.
+
+**Scope note:** This demo only simulates small synthetic "test report" files in S3 to
+demonstrate the pattern; it does not ingest real CAD files or large simulation outputs — that
+would be a real-world extension, documented as out of scope rather than silently skipped.
