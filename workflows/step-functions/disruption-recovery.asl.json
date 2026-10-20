@@ -1,0 +1,167 @@
+{
+  "Comment": "AeroPlan AI disruption-recovery workflow. Rendered via Terraform templatefile() with var: http_bridge_lambda_arn (a single generic Lambda that forwards {method,path,body} to the private internal ALB and returns the HTTP response body as JSON).",
+  "StartAt": "ParallelImpactChecks",
+  "States": {
+    "ParallelImpactChecks": {
+      "Type": "Parallel",
+      "Comment": "Two independent deterministic checks run concurrently before agent analysis.",
+      "Branches": [
+        {
+          "StartAt": "OptimizeSchedule",
+          "States": {
+            "OptimizeSchedule": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${http_bridge_lambda_arn}",
+                "Payload": {
+                  "method": "POST",
+                  "path": "/api/schedules/optimize",
+                  "body.$": "$.downtimeEvent"
+                }
+              },
+              "ResultSelector": {
+                "candidateSchedules.$": "$.Payload.body"
+              },
+              "ResultPath": "$.optimizeResult",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "MaterialsReadinessCheck",
+          "States": {
+            "MaterialsReadinessCheck": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${http_bridge_lambda_arn}",
+                "Payload": {
+                  "method": "GET",
+                  "path": "/api/materials/shortages"
+                }
+              },
+              "ResultSelector": {
+                "materialShortages.$": "$.Payload.body"
+              },
+              "ResultPath": "$.materialsResult",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultSelector": {
+        "candidateSchedules.$": "$[0].optimizeResult.candidateSchedules",
+        "materialShortages.$": "$[1].materialsResult.materialShortages"
+      },
+      "ResultPath": "$.impactChecks",
+      "Next": "AnalyzeWithAgents"
+    },
+
+    "AnalyzeWithAgents": {
+      "Type": "Task",
+      "Comment": "Internally, agent-service fans out to its 4 specialist agents in parallel via LangGraph; this is one HTTP call from the orchestration's point of view.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${http_bridge_lambda_arn}",
+        "Payload": {
+          "method": "POST",
+          "path": "/agents/analyze-disruption",
+          "body": {
+            "downtimeEvent.$": "$.downtimeEvent",
+            "candidateSchedules.$": "$.impactChecks.candidateSchedules",
+            "materialShortages.$": "$.impactChecks.materialShortages",
+            "currentScheduleVersionId.$": "$.currentScheduleVersionId"
+          }
+        }
+      },
+      "ResultSelector": {
+        "agentFindings.$": "$.Payload.body"
+      },
+      "ResultPath": "$.agentResult",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "CreateProposalAndWaitForApproval"
+    },
+
+    "CreateProposalAndWaitForApproval": {
+      "Type": "Task",
+      "Comment": "waitForTaskToken: scheduling-service persists the PENDING proposal + stores the task token, then returns immediately. The execution stays paused until scheduling-service's own /approve or /reject endpoint later calls SendTaskSuccess/SendTaskFailure directly with this token.",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${http_bridge_lambda_arn}",
+        "Payload": {
+          "method": "POST",
+          "path": "/internal/proposals",
+          "body": {
+            "taskToken.$": "$$.Task.Token",
+            "executionArn.$": "$$.Execution.Id",
+            "machineDowntimeId.$": "$.machineDowntimeId",
+            "basedOnScheduleVersionId.$": "$.currentScheduleVersionId",
+            "candidateSchedules.$": "$.impactChecks.candidateSchedules",
+            "agentFindings.$": "$.agentResult.agentFindings"
+          }
+        }
+      },
+      "TimeoutSeconds": 259200,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "Next": "ProposalExpired"
+        }
+      ],
+      "Next": "DecisionMade"
+    },
+
+    "DecisionMade": {
+      "Type": "Choice",
+      "Comment": "scheduling-service's /approve or /reject handler already performed the actual publish/reject transactionally before sending this callback; these branches only close out execution history.",
+      "Choices": [
+        {
+          "Variable": "$.decision",
+          "StringEquals": "APPROVED",
+          "Next": "RecoveryApproved"
+        }
+      ],
+      "Default": "RecoveryRejected"
+    },
+
+    "RecoveryApproved": { "Type": "Succeed" },
+    "RecoveryRejected": { "Type": "Succeed" },
+    "ProposalExpired": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${http_bridge_lambda_arn}",
+        "Payload": {
+          "method": "POST",
+          "path": "/internal/proposals/expire",
+          "body": { "executionArn.$": "$$.Execution.Id" }
+        }
+      },
+      "End": true
+    }
+  }
+}
